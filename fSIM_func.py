@@ -9,7 +9,7 @@ import pickle
 from dftregistration import dftregistration
 
 
-def image_upsampling(I_image, Ic_image, upsamp_factor = 1, bg = 0):
+def image_upsampling(I_image, upsamp_factor = 1, bg = 0):
     F = lambda x: ifftshift(fft2(fftshift(x)))
     iF = lambda x: ifftshift(ifft2(fftshift(x)))
     
@@ -19,15 +19,12 @@ def image_upsampling(I_image, Ic_image, upsamp_factor = 1, bg = 0):
     M = Mcrop*upsamp_factor
 
     I_image_up = np.zeros((Nimg,N,M))
-    Ic_image_up = np.zeros((Nimg,N,M))
     
     for i in range(0,Nimg):
         I_image_up[i] = abs(iF(np.pad(F(np.maximum(0,I_image[i]-bg)),\
                                   (((N-Ncrop)//2,),((M-Mcrop)//2,)),mode='constant')))
-        Ic_image_up[i] = abs(iF(np.pad(F(np.maximum(0,Ic_image[i]-bg)),\
-                                   (((N-Ncrop)//2,),((M-Mcrop)//2,)),mode='constant')))
-
-    return I_image_up, Ic_image_up
+        
+    return I_image_up
 
 
 def display_image_movie(image_stack, frame_num, size, pause_time=0.0001):
@@ -44,8 +41,8 @@ def display_image_movie(image_stack, frame_num, size, pause_time=0.0001):
         
         
         
-def image_registration(Ic_image_up,usfac):
-    Nimg,_,_ = Ic_image_up.shape
+def image_registration(img_stack,usfac, img_up):
+    Nimg,_,_ = img_stack.shape
     xshift = np.zeros(Nimg)
     yshift = np.zeros(Nimg)
 
@@ -54,9 +51,9 @@ def image_registration(Ic_image_up,usfac):
             yshift[i] == 0
             xshift[i] == 0
         else:
-            output = dftregistration(fft2(Ic_image_up[0]),fft2(Ic_image_up[i]),usfac)
-            yshift[i] = output[0]
-            xshift[i] = output[1]
+            output = dftregistration(fft2(img_stack[0]),fft2(img_stack[i]),usfac)
+            yshift[i] = output[0] * img_up
+            xshift[i] = output[1] * img_up
             
     return xshift, yshift
 
@@ -128,8 +125,8 @@ class fSIM_solver:
         # iteration error
         self.err = np.zeros(self.itr+1)
     
-    def iterative_algorithm(self, I_image_up, update_shift=1, update_OTF=0):
-        f1,ax = plt.subplots(1,3,figsize=(15,5))
+    def iterative_algorithm(self, I_image_up, update_shift=1, shift_alpha=1, update_OTF=0, OTF_alpha=1, figsize=(15,5)):
+        f1,ax = plt.subplots(1,3,figsize=figsize)
 
         tic_time = time.time()
         print('|  Iter  |  error  |  Elapsed time (sec)  |')
@@ -138,7 +135,7 @@ class fSIM_solver:
 
             # sequential update
             for j in range(0,self.Nimg):
-
+                
                 Ip_shift = np.maximum(0, np.real(ifft2(fft2(self.I_p_whole) * \
                                       np.exp(1j*2*np.pi*self.ps*(self.fxxp * self.xshift[j] + self.fyyp * self.yshift[j])))))
                 I_p = Ip_shift[self.yshift_max:self.Nc+self.yshift_max, self.xshift_max:self.Mc+self.xshift_max]
@@ -162,8 +159,8 @@ class fSIM_solver:
                 self.I_p_whole = np.real(ifft2(fft2(self.I_p_whole - grad_Ip/(np.max(self.I_obj)**2)) * self.Pattern_support))
                 
                 if update_OTF ==1:
-                    self.T_incoherent = self.T_incoherent - grad_OTF/np.max(abs(I_multi_f)) * \
-                         abs(I_multi_f) / (abs(I_multi_f)**2 + 1e-3) / 12 * self.OTF_support
+                    self.T_incoherent = (self.T_incoherent - grad_OTF/np.max(abs(I_multi_f)) * \
+                         abs(I_multi_f) / (abs(I_multi_f)**2 + 1e-3) * OTF_alpha * self.OTF_support).copy()
 
                 # shift estimate
                 if update_shift ==1:
@@ -177,8 +174,8 @@ class fSIM_solver:
                     grad_xshift = -np.real(np.sum(np.conj(I_temp) * self.I_obj * Ip_shift_fx))
                     grad_yshift = -np.real(np.sum(np.conj(I_temp) * self.I_obj * Ip_shift_fy))
 
-                    self.xshift[j] = self.xshift[j] - grad_xshift/self.N/self.M/(np.max(self.I_obj)**2)
-                    self.yshift[j] = self.yshift[j] - grad_yshift/self.N/self.M/(np.max(self.I_obj)**2)
+                    self.xshift[j] = self.xshift[j] - grad_xshift/self.N/self.M/(np.max(self.I_obj)**2) * shift_alpha
+                    self.yshift[j] = self.yshift[j] - grad_yshift/self.N/self.M/(np.max(self.I_obj)**2) * shift_alpha
 
                 self.err[i+1] += np.sum(abs(I_diff)**2)
 
@@ -213,16 +210,18 @@ class fSIM_solver:
                     tempp_Ip = temp_Ip.copy()
 
             if np.mod(i,1) == 0:
-                print('|  %d  |  %.2e  |   %.2f   |'%(i,self.err[i+1],time.time()-tic_time))
+                print('|  %d  |  %.2e  |   %.2f   |'%(i+1,self.err[i+1],time.time()-tic_time))
                 if i != 1:
                     ax[0].cla()
                     ax[1].cla()
                     ax[2].cla()
                 ax[0].imshow(np.maximum(0,self.I_obj),cmap='gray');
                 ax[1].imshow(np.maximum(0,self.I_p_whole),cmap='gray')
-                ax[2].plot(self.xshift,self.yshift,'bo')
+                ax[2].plot(self.xshift,self.yshift,'w')
                 display.display(f1)
                 display.clear_output(wait=True)
                 time.sleep(0.0001)
+                if i == self.itr-1:
+                    print('|  %d  |  %.2e  |   %.2f   |'%(i+1,self.err[i+1],time.time()-tic_time))
 
 
